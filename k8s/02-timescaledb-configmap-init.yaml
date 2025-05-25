@@ -8,10 +8,17 @@ data:
     -- Enable TimescaleDB extension if not already enabled by the image
     CREATE EXTENSION IF NOT EXISTS timescaledb;
 
-    -- Create the container_logs table
+    -- Create the raw FluentBit landing table (this is what FluentBit creates)
+    CREATE TABLE IF NOT EXISTS fluentbit_raw (
+        tag TEXT,
+        time TIMESTAMP WITHOUT TIME ZONE,
+        data JSONB
+    );
+
+    -- Create the container_logs table with the desired schema
     CREATE TABLE IF NOT EXISTS container_logs (
         time TIMESTAMPTZ NOT NULL,
-        timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        ingestion_time TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         log TEXT,
         stream VARCHAR(10),
         pod_name VARCHAR(255),
@@ -22,8 +29,7 @@ data:
         kubernetes_annotations JSONB
     );
 
-    -- Convert to hypertable, only if it's not already one
-    -- This check avoids errors on subsequent starts if the DB already exists
+    -- Convert container_logs to hypertable, only if it's not already one
     DO $$
     BEGIN
         IF NOT EXISTS (
@@ -35,6 +41,58 @@ data:
         END IF;
     END $$;
 
-    -- Optional: Create an index for faster queries on common fields
-    CREATE INDEX IF NOT EXISTS idx_container_logs_pod_namespace_time ON container_logs (pod_name, namespace, time DESC);
+    -- Create the trigger function to transform and route data
+    CREATE OR REPLACE FUNCTION transform_fluentbit_data()
+    RETURNS TRIGGER AS $$
+    BEGIN
+        -- Insert transformed data into container_logs table
+        INSERT INTO container_logs (
+            time,
+            log,
+            stream,
+            pod_name,
+            namespace,
+            container_name,
+            node_name,
+            kubernetes_labels,
+            kubernetes_annotations
+        )
+        VALUES (
+            -- Convert time to timestamptz
+            NEW.time AT TIME ZONE 'UTC',
+            -- Extract log message
+            COALESCE(NEW.data->>'log', NEW.data->>'message', ''),
+            -- Extract stream (stdout/stderr)
+            NEW.data->>'stream',
+            -- Extract Kubernetes metadata
+            NEW.data->'kubernetes'->>'pod_name',
+            NEW.data->'kubernetes'->>'namespace_name',
+            NEW.data->'kubernetes'->>'container_name',
+            NEW.data->'kubernetes'->>'host',
+            -- Store labels as JSONB
+            NEW.data->'kubernetes'->'labels',
+            -- Store annotations as JSONB
+            NEW.data->'kubernetes'->'annotations'
+        );
+        
+        -- Return NULL to prevent insertion into the raw table
+        -- (or return NEW if you want to keep raw data as well)
+        RETURN NULL;
+    END;
+    $$ LANGUAGE plpgsql;
+
+    -- Create the trigger on the raw table
+    DROP TRIGGER IF EXISTS trigger_transform_fluentbit_data ON fluentbit_raw;
+    CREATE TRIGGER trigger_transform_fluentbit_data
+        BEFORE INSERT ON fluentbit_raw
+        FOR EACH ROW
+        EXECUTE FUNCTION transform_fluentbit_data();
+
+    -- Create indexes for better query performance
+    CREATE INDEX IF NOT EXISTS idx_container_logs_time ON container_logs (time DESC);
+    CREATE INDEX IF NOT EXISTS idx_container_logs_pod_name ON container_logs (pod_name);
+    CREATE INDEX IF NOT EXISTS idx_container_logs_namespace ON container_logs (namespace);
+    CREATE INDEX IF NOT EXISTS idx_container_logs_container_name ON container_logs (container_name);
+    CREATE INDEX IF NOT EXISTS idx_container_logs_node_name ON container_logs (node_name);
     CREATE INDEX IF NOT EXISTS idx_container_logs_labels ON container_logs USING GIN (kubernetes_labels);
+    CREATE INDEX IF NOT EXISTS idx_container_logs_annotations ON container_logs USING GIN (kubernetes_annotations);

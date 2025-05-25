@@ -17,14 +17,14 @@ spec:
     spec:
       containers:
         - name: timescaledb
-          image: timescale/timescaledb-ha:pg17-latest
+          image: timescale/timescaledb:latest-pg17
           ports:
             - containerPort: 5432
           env:
             - name: POSTGRES_USER
-              value: "vectoruser" # Demo user
+              value: "demouser" # Demo user
             - name: POSTGRES_PASSWORD
-              value: "vectorpass" # Demo password - INSECURE for production
+              value: "demopass" # Demo password - INSECURE for production
             - name: POSTGRES_DB
               value: "demologs"   # Demo database name
             - name: TS_TUNE_MEMORY
