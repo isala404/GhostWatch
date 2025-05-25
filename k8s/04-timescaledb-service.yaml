@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: timescaledb-service
+  namespace: monitoring
+  labels:
+    app: timescaledb
+spec:
+  ports:
+    - port: 5432
+      targetPort: 5432
+      name: postgres
+  selector:
+    app: timescaledb
+  type: ClusterIP # Only accessible within the cluster

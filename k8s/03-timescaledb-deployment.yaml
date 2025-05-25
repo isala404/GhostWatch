@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: timescaledb
+  namespace: monitoring
+  labels:
+    app: timescaledb
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: timescaledb
+  template:
+    metadata:
+      labels:
+        app: timescaledb
+    spec:
+      containers:
+        - name: timescaledb
+          image: timescale/timescaledb-ha:pg17-latest
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              value: "vectoruser" # Demo user
+            - name: POSTGRES_PASSWORD
+              value: "vectorpass" # Demo password - INSECURE for production
+            - name: POSTGRES_DB
+              value: "demologs"   # Demo database name
+            - name: TS_TUNE_MEMORY
+              value: "512MB" # Adjust based on your node resources for the demo
+            - name: TS_TUNE_NUM_CPUS
+              value: "1"     # Adjust based on your node resources for the demo
+          volumeMounts:
+            - name: timescaledb-storage
+              mountPath: /var/lib/postgresql/data
+            - name: timescaledb-init-scripts
+              mountPath: /docker-entrypoint-initdb.d # Scripts here are run on first DB init
+          readinessProbe:
+            tcpSocket:
+              port: 5432
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: 5432
+            initialDelaySeconds: 30
+            periodSeconds: 10
+      volumes:
+        - name: timescaledb-storage
+          persistentVolumeClaim:
+            claimName: timescaledb-pvc
+        - name: timescaledb-init-scripts
+          configMap:
+            name: timescaledb-init-scripts

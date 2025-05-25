@@ -1,0 +1,40 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: timescaledb-init-scripts
+  namespace: monitoring
+data:
+  init.sql: |
+    -- Enable TimescaleDB extension if not already enabled by the image
+    CREATE EXTENSION IF NOT EXISTS timescaledb;
+
+    -- Create the container_logs table
+    CREATE TABLE IF NOT EXISTS container_logs (
+        time TIMESTAMPTZ NOT NULL,
+        timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        log TEXT,
+        stream VARCHAR(10),
+        pod_name VARCHAR(255),
+        namespace VARCHAR(255),
+        container_name VARCHAR(255),
+        node_name VARCHAR(255),
+        kubernetes_labels JSONB,
+        kubernetes_annotations JSONB
+    );
+
+    -- Convert to hypertable, only if it's not already one
+    -- This check avoids errors on subsequent starts if the DB already exists
+    DO $$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1
+            FROM timescaledb_information.hypertables
+            WHERE hypertable_name = 'container_logs'
+        ) THEN
+            PERFORM create_hypertable('container_logs', 'time');
+        END IF;
+    END $$;
+
+    -- Optional: Create an index for faster queries on common fields
+    CREATE INDEX IF NOT EXISTS idx_container_logs_pod_namespace_time ON container_logs (pod_name, namespace, time DESC);
+    CREATE INDEX IF NOT EXISTS idx_container_logs_labels ON container_logs USING GIN (kubernetes_labels);

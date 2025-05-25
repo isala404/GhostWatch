@@ -1,0 +1,73 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fluentbit
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: fluentbit
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: fluentbit
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: fluentbit
+    spec:
+      serviceAccountName: fluentbit
+      tolerations:
+      - operator: Exists
+        effect: NoSchedule
+      - operator: Exists
+        effect: NoExecute
+      containers:
+      - name: fluentbit
+        image: fluent/fluent-bit:latest # For production, use a specific version like 2.2.2
+        imagePullPolicy: Always
+        ports:
+          - name: http
+            containerPort: 2020 # For health checks and metrics
+        env:
+          - name: NODE_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: spec.nodeName
+        # Fluent Bit requires root or sufficient capabilities to read logs
+        # securityContext:
+        #   privileged: true # Easiest for demo, but review for production
+        volumeMounts:
+        - name: varlog
+          mountPath: /var/log
+        - name: varlibdockercontainers
+          mountPath: /var/lib/docker/containers
+          readOnly: true
+        - name: fluentbit-config
+          mountPath: /fluent-bit/etc/
+        # Mount service account for Kubernetes API access
+        - name: serviceaccount
+          mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+          readOnly: true
+      terminationGracePeriodSeconds: 10
+      volumes:
+      - name: varlog
+        hostPath:
+          path: /var/log
+      - name: varlibdockercontainers
+        hostPath:
+          path: /var/lib/docker/containers
+      - name: fluentbit-config
+        configMap:
+          name: fluentbit-config
+      - name: serviceaccount
+        projected: # Project service account token, ca.crt
+          sources:
+          - serviceAccountToken:
+              path: token
+              expirationSeconds: 7200 # Or longer
+          - configMap:
+              name: kube-root-ca.crt # Standard CA cert ConfigMap in newer K8s
+              items:
+              - key: ca.crt
+                path: ca.crt
+          # If kube-root-ca.crt is not available, you might need to mount the secret directly
+          # or adjust the Kube_CA_File path in fluent-bit.conf

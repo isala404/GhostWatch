@@ -1,0 +1,125 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluentbit-config
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: fluentbit
+data:
+  # Configuration files: server, input, filters, and output
+  # ======================================================
+  fluent-bit.conf: |
+    [SERVICE]
+        Flush             5
+        Log_Level         info
+        Daemon            off
+        Parsers_File      parsers.conf
+        HTTP_Server       On
+        HTTP_Listen       0.0.0.0
+        HTTP_Port         2020
+
+    @INCLUDE input-kubernetes.conf
+    @INCLUDE filter-kubernetes.conf
+    @INCLUDE filter-lua-transform.conf
+    @INCLUDE output-postgres.conf
+
+  input-kubernetes.conf: |
+    [INPUT]
+        Name              tail
+        Tag               kube.*
+        Path              /var/log/containers/*.log
+        Parser            cri # Using CRI parser for container logs
+        DB                /var/log/flb_kube.db
+        Mem_Buf_Limit     10MB
+        Skip_Long_Lines   On
+        Refresh_Interval  10
+        # For multiline logs
+        Multiline         On
+        Parser_Firstline  docker_no_time # A common firstline parser for Docker/CRI
+
+  filter-kubernetes.conf: |
+    [FILTER]
+        Name              kubernetes
+        Match             kube.*
+        Kube_URL          https://kubernetes.default.svc:443
+        Kube_CA_File      /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        Kube_Token_File   /var/run/secrets/kubernetes.io/serviceaccount/token
+        Kube_Tag_Prefix   kube.var.log.containers.
+        Merge_Log         On
+        Keep_Log          Off # The parsed log is merged, original 'log' field from parser is not needed
+        K8S-Logging.Parser On # Helps with further parsing if needed
+        K8S-Logging.Exclude On # Exclude fluent-bit's own logs
+
+  filter-lua-transform.conf: |
+    [FILTER]
+        Name              lua
+        Match             kube.*
+        script            transform.lua
+        call              map_to_schema
+
+  output-postgres.conf: |
+    [OUTPUT]
+        Name              postgresql
+        Match             kube.*
+        Host              timescaledb-service.monitoring.svc.cluster.local
+        Port              5432
+        User              demouser
+        Password          demopass
+        Database          demologs
+        Table             container_logs
+        Timestamp_Key     time # This tells Fluent Bit which field from the transformed record should be the primary time
+        # Fluent bit will automatically try to match keys in the record to column names
+        # Ensure your lua script produces keys matching your table columns
+
+  parsers.conf: |
+    [PARSER]
+        Name        cri
+        Format      regex
+        Regex       ^(?<time>[^ ]+) (?<stream>stdout|stderr) (?<logtag>[^ ]*) (?<log>.*)$
+        Time_Key    time
+        Time_Format %Y-%m-%dT%H:%M:%S.%L%z
+        Time_Keep   On
+
+    [PARSER]
+        Name        docker_no_time # For multiline detection
+        Format      regex
+        Regex       ^(?<log>.*)$
+
+  transform.lua: |
+    -- Lua script to transform Fluent Bit record to match PostgreSQL schema
+    function map_to_schema(tag, timestamp, record)
+        local new_record = {}
+
+        -- The 'time' field from the 'cri' parser is the original log timestamp
+        if record.time then
+            new_record.time = record.time
+        else
+            -- Fallback to Fluent Bit's event timestamp if parser 'time' is missing
+            new_record.time = os.date("!%Y-%m-%dT%H:%M:%S.", timestamp) .. string.format("%06dZ", math.floor(select(2, math.modf(timestamp)) * 1000000))
+        end
+
+        new_record.log = record.log -- This is the log message from the 'cri' parser
+
+        if record.kubernetes then
+            new_record.pod_name = record.kubernetes.pod_name
+            new_record.namespace = record.kubernetes.namespace_name
+            new_record.container_name = record.kubernetes.container_name
+            new_record.node_name = record.kubernetes.host -- Kubernetes filter usually puts node name in 'host'
+            new_record.kubernetes_labels = record.kubernetes.labels -- This will be a Lua table, pgsql output handles JSONB
+            new_record.kubernetes_annotations = record.kubernetes.annotations -- Also a Lua table
+        else
+            new_record.pod_name = "unknown"
+            new_record.namespace = "unknown"
+            new_record.container_name = "unknown"
+            new_record.node_name = "unknown"
+            new_record.kubernetes_labels = {}
+            new_record.kubernetes_annotations = {}
+        end
+
+        new_record.stream = record.stream -- stdout or stderr from 'cri' parser
+
+        -- The 'timestamp' column in Postgres has DEFAULT NOW(), so we don't send it.
+        -- The 'time' column above is crucial.
+
+        return 1, timestamp, new_record
+    end
